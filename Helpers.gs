@@ -887,6 +887,20 @@ function processNativeEvent(item) {
   processSourceEvent(item);
 }
 
+/** Hash JSON values consistently when an API returns object fields in a different order. */
+function stableStringify(value) {
+  function sorted(input) {
+    if (Array.isArray(input)) return input.map(sorted);
+    if (input && Object.prototype.toString.call(input) === "[object Object]") {
+      var result = {};
+      Object.keys(input).sort().forEach(function (key) { result[key] = sorted(input[key]); });
+      return result;
+    }
+    return input;
+  }
+  return JSON.stringify(sorted(value));
+}
+
 /** Convert either source adapter's output into a common sync record. */
 function normalizeSyncEvent(input, calendarTz) {
   if (input.nativeEvent) {
@@ -1043,7 +1057,7 @@ function makeNativeEvent(sourceEvent, source, sourceKey, materialized) {
     }
   }
   var id = sourceKey || nativeEventKey(source.calendar.id, sourceEvent.id);
-  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, JSON.stringify(copy), Utilities.Charset.UTF_8).toString();
+  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, stableStringify(copy), Utilities.Charset.UTF_8).toString();
   copy.extendedProperties = {
     private: {
       fromGAS: "true", id: id, MD5: digest,

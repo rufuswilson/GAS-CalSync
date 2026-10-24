@@ -218,7 +218,7 @@ function recordMigrationAction_(action, event, copy) {
 
 function migrationFingerprint_() {
   var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5,
-    JSON.stringify(migrationActions), Utilities.Charset.UTF_8);
+    stableStringify(migrationActions), Utilities.Charset.UTF_8);
   return bytes.map(function (byte) { return (byte & 255).toString(16).padStart(2, "0"); }).join("");
 }
 

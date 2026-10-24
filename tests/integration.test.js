@@ -50,6 +50,26 @@ test('new sync options have defaults when an older private Config.gs omits them'
   assert.equal(context.autoUpdateBranch, 'stable');
 });
 
+test('native event hashes and migration fingerprints ignore API object key order', () => {
+  const s = script({});
+  const source = {calendar: {id: 'source-id', summary: 'Source'}, source: 'source-id'};
+  const first = {id: 'event-1', summary: 'Meeting',
+    start: {dateTime: '2026-10-26T10:00:00+01:00', timeZone: 'Europe/Paris'},
+    end: {dateTime: '2026-10-26T11:00:00+01:00', timeZone: 'Europe/Paris'},
+    reminders: {useDefault: false, overrides: [{method: 'popup', minutes: 10}]}};
+  const reordered = {id: 'event-1', summary: 'Meeting',
+    start: {timeZone: 'Europe/Paris', dateTime: '2026-10-26T10:00:00+01:00'},
+    end: {timeZone: 'Europe/Paris', dateTime: '2026-10-26T11:00:00+01:00'},
+    reminders: {overrides: [{minutes: 10, method: 'popup'}], useDefault: false}};
+  const a = s.makeNativeEvent(first, source);
+  const b = s.makeNativeEvent(reordered, source);
+  assert.equal(a.extendedProperties.private.MD5, b.extendedProperties.private.MD5);
+  s.migrationActions = [{action: 'update', start: first.start}];
+  const fingerprint = s.migrationFingerprint_();
+  s.migrationActions = [{start: reordered.start, action: 'update'}];
+  assert.equal(s.migrationFingerprint_(), fingerprint);
+});
+
 test('configuration finds the active email and falls back to the trigger owner', () => {
   const helpers = fs.readFileSync(path.join(__dirname, '..', 'Helpers.gs'), 'utf8');
   const context = vm.createContext({Session: {
