@@ -6,7 +6,7 @@ This is a standalone script (that consists of multiple files). The purpose is to
 
 ### Copy the Apps Script project
 
-[Open this fork's Google Apps Script project](https://script.google.com/home/projects/1CmroZGxk7rdULDfgHWxr2TjsAMtFh7nErW4MA3XqS70rjgvF1Mm87kKwedit) and make your own copy from the project overview (ⓘ) using the copy icon in the top right. Edit `Config.gs` in your copy with your own calendar mappings and update `Filters.gs` with any filters you want to apply before running `install()`.
+[Open this fork's Google Apps Script project](https://script.google.com/home/projects/1CmroZGxk7rdULDfgHWxr2TjsAMtFh7nErW4MA3XqS70rjgvF1Mm87kKw) and make your own copy from the project overview (ⓘ) using the copy icon in the top right. Edit `Config.gs` in your copy with your own calendar mappings and update `Filters.gs` with any filters you want to apply before running `install()`.
 
 ### Source options in this fork
 
