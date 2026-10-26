@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to publish or upload again (for example, v1.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,8 +17,22 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      TAG_NAME: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Verify release tag
+        run: |
+          if [[ ! "$TAG_NAME" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "Choose an existing v* release tag" >&2
+            exit 1
+          fi
+          test -f "releases/$TAG_NAME.md" || {
+            echo "Missing release notes for $TAG_NAME" >&2
+            exit 1
+          }
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -40,10 +60,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" \
+          gh release view "$TAG_NAME" >/dev/null 2>&1 || \
+            gh release create "$TAG_NAME" \
               --verify-tag \
-              --title "$GITHUB_REF_NAME" \
-              --notes-file "releases/$GITHUB_REF_NAME.md"
+              --title "$TAG_NAME" \
+              --notes-file "releases/$TAG_NAME.md"
       - name: Upload all release files to Apps Script
         run: clasp push --force
