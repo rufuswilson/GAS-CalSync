@@ -4,6 +4,10 @@ GAS-CalSync is a fork of [derekantrican/GAS-ICS-Sync](https://github.com/derekan
 
 This is a standalone script (that consists of multiple files). The purpose is to sync ics/ical calendars to Google Calendar. Google Calendar *can* already do this, but updates only happen once every 12 or even 24 hrs. This script can be run much more frequently.
 
+### Copy the Apps Script project
+
+[Open this fork's Google Apps Script project](https://script.google.com/u/1/home/projects/16wu-EUFV2wQpIpwUwcbr475vQHLnMax1_xSqMkmePzig7YzZWcvsa6H4/edit) and make your own copy from the project overview (ⓘ) using the copy icon in the top right. Edit `Config.gs` in your copy with your own calendar mappings and update `Filters.gs` with any filters you want to apply before running `install()`.
+
 ### Source options in this fork
 
 Edit `Config.gs` to set `sourceCalendars` and the sync options. Define `sourceCalendars` as a list of objects with `source`, `target`, and optional `colour`. `source` can be an ICS URL, a Google Calendar ID, or a subscribed calendar name. Use an ID when names are ambiguous. The per-source colour works with either source type. `color` is accepted as a US spelling alias:
