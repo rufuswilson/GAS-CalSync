@@ -13,11 +13,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify release files
+        run: node --test tests/*.test.js
+      - name: Install clasp
+        run: npm install --global @google/clasp@3.4.1
+      - name: Configure Google authorization and release target
+        env:
+          CLASP_CREDENTIALS: ${{ secrets.CLASP_CREDENTIALS }}
+          RELEASE_SCRIPT_ID: ${{ vars.GAS_project_ID }}
+        run: |
+          if [ -z "$CLASP_CREDENTIALS" ]; then
+            echo "The CLASP_CREDENTIALS Actions secret is missing" >&2
+            exit 1
+          fi
+          if [ -z "$RELEASE_SCRIPT_ID" ]; then
+            echo "The GAS_project_ID Actions variable is missing" >&2
+            exit 1
+          fi
+          printf '%s' "$CLASP_CREDENTIALS" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+          node -e 'const fs = require("node:fs"); const id = process.env.RELEASE_SCRIPT_ID; if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid Release Script ID"); fs.writeFileSync(".clasp.json", JSON.stringify({ scriptId: id, rootDir: "." }) + "\n");'
       - name: Publish release notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --verify-tag \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file "releases/$GITHUB_REF_NAME.md"
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "releases/$GITHUB_REF_NAME.md"
+      - name: Upload all release files to Apps Script
+        run: clasp push --force
