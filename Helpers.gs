@@ -1,3 +1,22 @@
+
+var defaultMaxRetries = typeof defaultMaxRetries === "number" ? defaultMaxRetries : 10; // Keep a private Config.gs override.
+
+// Defaults for Apps Script projects whose private Config.gs predates these options.
+// Config.gs may override every value below; an explicit false or null is preserved.
+var skipIfEmptyFeed = typeof skipIfEmptyFeed === "undefined" ? true : skipIfEmptyFeed;
+var pastEventWindowDays = typeof pastEventWindowDays === "undefined" ? null : pastEventWindowDays;
+var maxCleanupDeletesPerRun = typeof maxCleanupDeletesPerRun === "undefined" ? 100 : maxCleanupDeletesPerRun;
+var recurringInstanceWindowDays = typeof recurringInstanceWindowDays === "undefined" ? 180 : recurringInstanceWindowDays;
+var titlePrefix = typeof titlePrefix === "undefined" ? "" : titlePrefix;
+var titlePrefixAllDayOnly = typeof titlePrefixAllDayOnly === "undefined" ? false : titlePrefixAllDayOnly;
+var mapMicrosoftTentativeToFree = typeof mapMicrosoftTentativeToFree === "undefined" ? false : mapMicrosoftTentativeToFree;
+var fallbackReminderMinutes = typeof fallbackReminderMinutes === "undefined" ? -1 : fallbackReminderMinutes;
+var decodeOutlookSafeLinks = typeof decodeOutlookSafeLinks === "undefined" ? false : decodeOutlookSafeLinks;
+var autoUpdateRepository = typeof autoUpdateRepository === "undefined" ? "rufuswilson/GAS-CalSync" : autoUpdateRepository;
+var autoUpdateMode = typeof autoUpdateMode === "undefined" ? "auto" : autoUpdateMode;
+var autoUpdateChannel = typeof autoUpdateChannel === "undefined" ? "release" : autoUpdateChannel;
+var autoUpdateBranch = typeof autoUpdateBranch === "undefined" ? "stable" : autoUpdateBranch;
+
 /**
  * Formats the date and time according to the format specified in the configuration.
  *
@@ -382,124 +401,227 @@ function setupTargetCalendar(targetCalendarName, explicitId, createIfMissing) {
 
 /** Implementation for the public clearGASEvents entry point in Code.gs. */
 function clearGASEvents_(targetName, dryRun) {
-  if (!targetName || !condenseCalendarMap(sourceCalendars).some(function (group) { return group.target === targetName; }))
-    throw new Error("Specify a configured target calendar name");
-
-  var calendars = [];
-  var pageToken;
-  do {
-    var options = { showHidden: true, maxResults: 250 };
-    if (pageToken) options.pageToken = pageToken;
-    var page = callWithBackoff(function () { return Calendar.CalendarList.list(options); }, defaultMaxRetries);
-    if (!page) throw new Error("Could not list calendars");
-    calendars = calendars.concat(page.items || []);
-    pageToken = page.nextPageToken;
-  } while (pageToken);
-  var matches = calendars.filter(function (calendar) {
-    return (calendar.summaryOverride || calendar.summary) === targetName &&
-      (calendar.accessRole === "owner" || calendar.accessRole === "writer");
-  });
-  if (matches.length !== 1) throw new Error("Expected exactly one writable target calendar named " + targetName);
-
-  var events = [];
-  pageToken = undefined;
-  do {
-    var eventOptions = {
-      maxResults: 2500, showDeleted: false, singleEvents: false,
-      privateExtendedProperty: "fromGAS=true"
-    };
-    if (pageToken) eventOptions.pageToken = pageToken;
-    var eventPage = callWithBackoff(function () { return Calendar.Events.list(matches[0].id, eventOptions); }, defaultMaxRetries);
-    if (!eventPage) throw new Error("Could not list script-created events");
-    events = events.concat((eventPage.items || []).filter(function (event) {
-      return event.extendedProperties && event.extendedProperties.private &&
-        event.extendedProperties.private.fromGAS === "true";
-    }));
-    pageToken = eventPage.nextPageToken;
-  } while (pageToken);
-
-  var preview = dryRun !== false;
-  if (!preview) {
-    events.sort(function (a, b) { return Number(!!a.recurrence) - Number(!!b.recurrence); });
-    events.forEach(function (event) {
-      var removed = callWithBackoff(function () {
-        Calendar.Events.remove(matches[0].id, event.id);
-        return true;
-      }, defaultMaxRetries);
-      if (!removed) throw new Error("Could not remove script-created event " + event.id);
-    });
-  }
-  Logger.log((preview ? "Would remove " : "Removed ") + events.length + " script-created events from " + targetName);
-  return { target: targetName, dryRun: preview, count: events.length };
-}
-
-function recordMigrationAction_(action, event, copy) {
-  migrationActions.push({ action: action, target: targetCalendarName, targetId: targetCalendarId,
-    eventId: event && event.id || "", sourceId: copy && copy.extendedProperties &&
-      copy.extendedProperties.private && copy.extendedProperties.private.id || "",
-    summary: copy && copy.summary || event && event.summary || "",
-    start: copy && copy.start || event && event.start || null,
-    digest: copy && copy.extendedProperties && copy.extendedProperties.private &&
-      copy.extendedProperties.private.MD5 || "" });
-}
-
-function migrationFingerprint_() {
-  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5,
-    stableStringify(migrationActions), Utilities.Charset.UTF_8);
-  return bytes.map(function (byte) { return (byte & 255).toString(16).padStart(2, "0"); }).join("");
-}
-
-function previewMigration_(remember) {
-  migrationActions = [];
-  migrationPreviewMode = true;
-  try {
-    startSync();
-    var fingerprint = migrationFingerprint_();
-    if (remember) PropertiesService.getScriptProperties().setProperty("migrationPreview:v2", fingerprint);
-    var result = { fingerprint: fingerprint, count: migrationActions.length,
-      actions: migrationActions.slice() };
-    Logger.log("Migration preview: " + JSON.stringify(result));
-    return result;
-  } finally {
-    migrationPreviewMode = false;
-  }
-}
-
-/** Check every existing target before a scheduled sync can write to any of them. */
-function requireMigrationReview_() {
-  var properties = PropertiesService.getScriptProperties();
-  if (properties.getProperty("migrationApproved:v2") === "true") return;
   var groups = condenseCalendarMap(sourceCalendars);
-  if (groups.length < 2) return; // The normal target read checks a single target before writing.
-  groups.forEach(function (group) {
-    var target;
-    try {
-      target = setupTargetCalendar(group.target, group.targetId, false);
-    } catch (error) {
-      if (group.createTargetCalendarIfMissing === true &&
-        /^Error: Target calendar not found: /.test(String(error))) return;
-      throw error;
-    }
-    var pageToken;
-    var seen = Object.create(null);
-    do {
-      var options = { showDeleted: false, privateExtendedProperty: "fromGAS=true", maxResults: 250 };
-      if (pageToken) options.pageToken = pageToken;
-      var page = callWithBackoff(function () { return Calendar.Events.list(target.id, options); }, defaultMaxRetries);
-      if (!page) throw new Error("Could not check target events before migration: " + group.target);
-      if ((page.items || []).some(function (event) {
-        var privateFields = event.extendedProperties && event.extendedProperties.private;
-        return event.status !== "cancelled" && privateFields &&
-          privateFields.fromGAS === "true" && privateFields.syncVersion !== "2";
-      })) throw new Error("Legacy copied events found in " + group.target +
-        ". Run PreviewMigration, review the log, then run ApplyMigration");
-      pageToken = page.nextPageToken;
-      if (pageToken && seen[pageToken]) throw new Error("Repeated target-event page token for " + group.target);
-      if (pageToken) seen[pageToken] = true;
-    } while (pageToken);
+  var allTargets = targetName === null;
+  if (!allTargets && (typeof targetName !== "string" || !groups.some(function (group) {
+    return group.target === targetName;
+  }))) throw new Error("Specify a target calendar name from sourceCalendars, or null for all targets");
+
+  var selectedGroups = allTargets ? groups : groups.filter(function (group) {
+    return group.target === targetName;
   });
-  properties.setProperty("migrationApproved:v2", "true");
+  var preview = dryRun !== false;
+  var results = selectedGroups.map(function (group) {
+    var targetCalendar = setupTargetCalendar(group.target, group.targetId, false);
+    var events = [];
+    var pageToken;
+    do {
+      var eventOptions = {
+        maxResults: 2500, showDeleted: false, singleEvents: false,
+        privateExtendedProperty: "fromGAS=true"
+      };
+      if (pageToken) eventOptions.pageToken = pageToken;
+      var eventPage = callWithBackoff(function () {
+        return Calendar.Events.list(targetCalendar.id, eventOptions);
+      }, defaultMaxRetries);
+      if (!eventPage) throw new Error("Could not list script-created events from " + group.target);
+      events = events.concat((eventPage.items || []).filter(function (event) {
+        return event.extendedProperties && event.extendedProperties.private &&
+          event.extendedProperties.private.fromGAS === "true";
+      }));
+      pageToken = eventPage.nextPageToken;
+    } while (pageToken);
+
+    if (!preview) {
+      events.sort(function (a, b) { return Number(!!a.recurrence) - Number(!!b.recurrence); });
+      events.forEach(function (event) {
+        var removed = callWithBackoff(function () {
+          Calendar.Events.remove(targetCalendar.id, event.id);
+          return true;
+        }, defaultMaxRetries);
+        if (!removed) throw new Error("Could not remove script-created event " + event.id + " from " + group.target);
+      });
+    }
+    Logger.log((preview ? "Would remove " : "Removed ") + events.length +
+      " script-created events from " + group.target);
+    return { target: group.target, dryRun: preview, count: events.length };
+  });
+
+  if (!allTargets) return results[0];
+  return {
+    target: null,
+    dryRun: preview,
+    count: results.reduce(function (total, result) { return total + result.count; }, 0),
+    targets: results
+  };
 }
+
+// Per-calendar global variables (must be reset before processing each new calendar!)
+var calendarEvents = [];
+var calendarEventsIds = [];
+var icsEventsIds = [];
+var icsEventSourceHashes = Object.create(null);
+var legacySeriesSourceHashes = Object.create(null);
+var recurringEvents = [];
+var targetCalendarId;
+var targetCalendarName;
+
+// Per-session global variables (must NOT be reset before processing each new calendar!)
+var addedEvents = [];
+var modifiedEvents = [];
+var removedEvents = [];
+
+// Syncing logic can set this to true to cause the Google Apps Script "Executions" dashboard to report failure
+var reportOverallFailure = false;
+
+function startSync_() {
+  var syncLock = LockService.getScriptLock();
+  if (!syncLock.tryLock(1000)) {
+    Logger.log("Another iteration is currently running! Exiting...");
+    return;
+  }
+
+  var runUserEmail = typeof getSyncUserEmail_ === "function" ? getSyncUserEmail_() : "";
+  if (runUserEmail) Logger.log("Run by user: " + runUserEmail);
+
+  try {
+    reportOverallFailure = false;
+    addedEvents = [];
+    modifiedEvents = [];
+    removedEvents = [];
+
+    //Disable email notification if no mail adress is provided
+    emailSummary = emailSummary && email != "";
+
+    var calendarGroups = condenseCalendarMap(sourceCalendars);
+    for (var calendar of calendarGroups) {
+      //------------------------ Reset globals ------------------------
+      calendarEvents = [];
+      calendarEventsIds = [];
+      icsEventsIds = [];
+      icsEventSourceHashes = Object.create(null);
+      legacySeriesSourceHashes = Object.create(null);
+      recurringEvents = [];
+
+      targetCalendarName = calendar.target;
+      var sourceCalendarURLs = calendar.sources;
+      var canAddOrModify = sourceCalendarURLs.some(function (source) {
+        return sourceSetting(source, "addEventsToCalendar", addEventsToCalendar) ||
+          sourceSetting(source, "modifyExistingEvents", modifyExistingEvents);
+      });
+      var canRemove = sourceCalendarURLs.some(function (source) {
+        return sourceSetting(source, "removeEventsFromCalendar", removeEventsFromCalendar);
+      });
+      var vevents;
+
+      //------------------------ Fetch URL items ------------------------
+      Logger.log("Fetching source calendars");
+      var responses = fetchSourceCalendars(sourceCalendarURLs);
+      Logger.log("Syncing " + responses.length + " calendars to " + targetCalendarName);
+      // A failed source must never make its existing target events look obsolete.
+      var sourceFetchFailed = responses.failed === true;
+
+      //------------------------ Get target calendar information------------------------
+      var targetCalendar = setupTargetCalendar(targetCalendarName, calendar.targetId,
+        calendar.createTargetCalendarIfMissing);
+      targetCalendarId = targetCalendar.id;
+      Logger.log("Working on calendar: " + targetCalendarId);
+
+      //------------------------ Parse existing events --------------------------
+      if (canAddOrModify || canRemove) {
+        // Smaller pages avoid one very large Calendar API response for an old target.
+        var targetEventPageSize = 250;
+        Logger.log("Listing existing target events");
+        var eventList =
+          callWithBackoff(function () {
+            return Calendar.Events.list(targetCalendarId, { showDeleted: false, privateExtendedProperty: "fromGAS=true", maxResults: targetEventPageSize });
+          }, defaultMaxRetries);
+        if (!eventList) throw new Error("Could not list target events for " + targetCalendarName);
+        calendarEvents = calendarEvents.concat((eventList.items || []).filter(function (event) { return event.status !== "cancelled"; }));
+        Logger.log("Listed " + calendarEvents.length + " active target events so far");
+        //loop until we received all events
+        var seenTargetPageTokens = Object.create(null);
+        while (eventList.nextPageToken) {
+          if (seenTargetPageTokens[eventList.nextPageToken])
+            throw new Error("Repeated target-event page token for " + targetCalendarName);
+          seenTargetPageTokens[eventList.nextPageToken] = true;
+          eventList = callWithBackoff(function () {
+            return Calendar.Events.list(targetCalendarId, { showDeleted: false, privateExtendedProperty: "fromGAS=true", maxResults: targetEventPageSize, pageToken: eventList.nextPageToken });
+          }, defaultMaxRetries);
+
+          if (!eventList) throw new Error("Could not list all target events for " + targetCalendarName);
+          calendarEvents = calendarEvents.concat((eventList.items || []).filter(function (event) { return event.status !== "cancelled"; }));
+          Logger.log("Listed " + calendarEvents.length + " active target events so far");
+        }
+        Logger.log("Fetched " + calendarEvents.length + " existing events from " + targetCalendarName);
+        for (var i = 0; i < calendarEvents.length; i++) {
+          if (calendarEvents[i].extendedProperties != null) {
+            var privateProperties = calendarEvents[i].extendedProperties.private || {};
+            calendarEventsIds[i] = privateProperties["rec-id"] || privateProperties["id"];
+          }
+        }
+
+        //------------------------ Parse ical events --------------------------
+        Logger.log("Parsing source events");
+        vevents = parseResponses(responses);
+        sourceFetchFailed = responses.failed === true;
+        Logger.log("Parsed " + vevents.length + " events from sources");
+      }
+
+      //------------------------ Process ical events ------------------------
+      if (canAddOrModify) {
+        Logger.log("Processing " + vevents.length + " events");
+        var calendarTz =
+          callWithBackoff(function () {
+            return Calendar.Settings.get("timezone").value;
+          }, defaultMaxRetries);
+
+        vevents.forEach(function (e, index) {
+          processSourceEvent(e, calendarTz);
+          if ((index + 1) % 100 === 0) Logger.log("Processed " + (index + 1) + " of " + vevents.length + " source events");
+        });
+
+        Logger.log("Done processing events");
+      }
+
+      //------------------------ Remove old events from calendar ------------------------
+      if (canRemove && !sourceFetchFailed && !responses.tasksOnly && !reportOverallFailure) {
+        Logger.log("Checking " + calendarEvents.length + " events for removal");
+        processEventCleanup(sourceCalendarURLs);
+        Logger.log("Done checking events for removal");
+      }
+      else if (sourceFetchFailed || responses.tasksOnly || reportOverallFailure)
+        Logger.log("Skipping cleanup because a source had no active events, could not be read, or an event could not be saved");
+
+      //------------------------ Process Tasks ------------------------
+      if (addTasks && !sourceFetchFailed) {
+        try {
+          processSourceTasks(responses);
+        } catch (taskError) {
+          Logger.log("Could not sync tasks: " + taskError);
+          reportOverallFailure = true;
+        }
+      }
+
+      //------------------------ Add Recurring Event Instances ------------------------
+      Logger.log("Processing " + recurringEvents.length + " Recurrence Instances!");
+      recurringEvents.forEach(syncSourceException);
+    }
+
+    if ((addedEvents.length + modifiedEvents.length + removedEvents.length) > 0 && emailSummary) {
+      sendSummary();
+    }
+    Logger.log("Sync finished!");
+    if (reportOverallFailure) {
+      // Cause the Google Apps Script "Executions" dashboard to show a failure
+      // (the message text does not seem to be logged anywhere)
+      throw new Error('The sync operation produced errors. See log for details.');
+    }
+  } finally {
+    syncLock.releaseLock();
+  }
+}
+
 
 /**
  * Parses all sources using ical.js.
@@ -1086,10 +1208,6 @@ function saveSourceEvent(copy, settings) {
   if (oldEvent && oldEvent.extendedProperties.private.MD5 === privateFields.MD5) {
     // Mark an unchanged event as migrated without rewriting its event content.
     if (oldEvent.id && oldEvent.extendedProperties.private.syncVersion !== "2") {
-      if (migrationPreviewMode) {
-        recordMigrationAction_("tag", oldEvent, copy);
-        return;
-      }
       try {
         var migrated = Object.assign({}, oldEvent.extendedProperties.private,
           { syncVersion: "2", sourceHash: sourceHash || oldEvent.extendedProperties.private.sourceHash });
@@ -1105,10 +1223,6 @@ function saveSourceEvent(copy, settings) {
   }
   if (oldEvent && !sourceSetting(settings, "modifyExistingEvents", modifyExistingEvents) ||
     !oldEvent && !sourceSetting(settings, "addEventsToCalendar", addEventsToCalendar)) return;
-  if (migrationPreviewMode) {
-    recordMigrationAction_(oldEvent ? "update" : "insert", oldEvent, copy);
-    return;
-  }
   try {
     var saved = callWithBackoff(function () {
       return oldEvent ? Calendar.Events.update(copy, targetCalendarId, oldEvent.id) :
@@ -1460,12 +1574,6 @@ function syncSourceException(exception) {
       !matchingParents[0].extendedProperties.private.sourceHash &&
       (icsEventSourceHashes[parentKey] || []).length <= 1)
       parent = matchingParents[0];
-    if (!parent && migrationPreviewMode && migrationActions.some(function (action) {
-      return action.action === "insert" && action.sourceId === parentKey && action.targetId === targetCalendarId;
-    })) {
-      recordMigrationAction_("create exception after parent", null, exception.copy || null);
-      return;
-    }
     if (!parent) throw new Error("Recurring parent is missing: " + parentKey);
     var instances = callWithBackoff(function () {
       return Calendar.Events.instances(targetCalendarId, parent.id, { originalStart: originalStart, showDeleted: true, maxResults: 2500 });
@@ -1477,8 +1585,7 @@ function syncSourceException(exception) {
     if (!instance) throw new Error("Recurrence instance is missing: " + originalStart);
     if (exception.cancelled) {
       if (sourceSetting(exception.settings, "removeEventsFromCalendar", removeEventsFromCalendar) && instance.status !== "cancelled")
-        if (migrationPreviewMode) recordMigrationAction_("delete exception", instance, null);
-        else callWithBackoff(function () { return Calendar.Events.remove(targetCalendarId, instance.id); }, defaultMaxRetries);
+        callWithBackoff(function () { return Calendar.Events.remove(targetCalendarId, instance.id); }, defaultMaxRetries);
       return;
     }
     if (!sourceSetting(exception.settings, "modifyExistingEvents", modifyExistingEvents)) return;
@@ -1486,10 +1593,6 @@ function syncSourceException(exception) {
     if (instance.status !== "cancelled" && instance.extendedProperties && instance.extendedProperties.private &&
       instance.extendedProperties.private.MD5 === copy.extendedProperties.private.MD5 &&
       instance.extendedProperties.private.syncVersion === "2") return;
-    if (migrationPreviewMode) {
-      recordMigrationAction_("update exception", instance, copy);
-      return;
-    }
     delete copy.recurringEventId; // The source recurrence ID is not a target Google event ID.
     if (instance.status === "cancelled" && !copy.status) copy.status = "confirmed";
     var updated = callWithBackoff(function () { return Calendar.Events.patch(copy, targetCalendarId, instance.id); }, defaultMaxRetries);
@@ -1548,9 +1651,6 @@ function processEventCleanup(sources) {
     var hash = privateProperties.sourceHash;
     if (!hash && ((feedIndex !== -1 && activeHashes.length === 1) || legacyHashes.length === 1)) {
       hash = feedIndex !== -1 && activeHashes.length === 1 ? activeHashes[0] : legacyHashes[0];
-      if (migrationPreviewMode) {
-        recordMigrationAction_("tag source", calendarEvents[i], null);
-      } else {
       try {
         var updatedPrivate = Object.assign({}, privateProperties, { sourceHash: hash });
         var patched = callWithBackoff(function () {
@@ -1563,7 +1663,6 @@ function processEventCleanup(sources) {
         Logger.log("Could not tag existing event " + currentID + ": " + e);
         reportOverallFailure = true;
         return;
-      }
       }
     }
     var stillInFeed = activeHashes.length ? activeHashes.indexOf(hash) !== -1 : feedIndex !== -1;
@@ -1582,12 +1681,6 @@ function processEventCleanup(sources) {
       continue;
     }
     Logger.log("Deleting old event " + currentID);
-    if (migrationPreviewMode) {
-      recordMigrationAction_("delete", calendarEvents[i], null);
-      attempts++;
-      if (attempts >= maxCleanupDeletesPerRun) return;
-      continue;
-    }
     attempts++;
     var removed = false;
     try {
@@ -1614,7 +1707,7 @@ function processEventCleanup(sources) {
       return;
     }
   }
-  if (!migrationPreviewMode) properties.deleteProperty(cursorKey);
+  properties.deleteProperty(cursorKey);
 }
 
 /** List task lists and tasks across every API page before matching source identities. */
@@ -2089,12 +2182,22 @@ function checkForUpdate() {
   var hasAutoUpdate = triggers.some(function (trigger) {
     return trigger.getHandlerFunction() === "AutoUpdate";
   });
-  if (!hasAutoUpdate)
+  if (!hasAutoUpdate && isCurrentUserTriggerOwner_())
     ScriptApp.newTrigger("AutoUpdate").timeBased().everyDays(1).create();
+  else if (!hasAutoUpdate)
+    Logger.log("Skipping AutoUpdate trigger because the current user is not the owner");
   triggers.forEach(function (trigger) {
     if (trigger.getHandlerFunction() === "checkForUpdate")
       ScriptApp.deleteTrigger(trigger);
   });
+}
+
+/** Whether the current user is the account under whose authority the script runs. */
+function isCurrentUserTriggerOwner_() {
+  if (typeof Session === "undefined") return false;
+  var currentEmail = String(Session.getActiveUser().getEmail() || "").trim().toLowerCase();
+  var ownerEmail = String(Session.getEffectiveUser().getEmail() || "").trim().toLowerCase();
+  return currentEmail !== "" && ownerEmail !== "" && currentEmail === ownerEmail;
 }
 
 // Identify the account running a manual sync or owning its scheduled trigger.

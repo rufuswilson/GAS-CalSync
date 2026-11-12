@@ -26,20 +26,23 @@ function script(calendar, options = {}) {
   return context;
 }
 
-test('retry limit is available from Code.gs without Config.gs', () => {
+test('retry limit is available from the runtime files without Config.gs', () => {
+  const runtime = ['Code.gs', 'Helpers.gs'].map(filename =>
+    fs.readFileSync(path.join(__dirname, '..', filename), 'utf8')).join('\n');
   const context = vm.createContext({});
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8'), context);
+  vm.runInContext(runtime, context);
   assert.equal(context.defaultMaxRetries, 10);
   const configured = vm.createContext({defaultMaxRetries: 4});
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8'), configured);
+  vm.runInContext(runtime, configured);
   assert.equal(configured.defaultMaxRetries, 4);
 });
 
 test('new sync options have defaults when an older private Config.gs omits them', () => {
-  const code = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
+  const runtime = ['Code.gs', 'Helpers.gs'].map(filename =>
+    fs.readFileSync(path.join(__dirname, '..', filename), 'utf8')).join('\n');
   const context = vm.createContext({skipIfEmptyFeed: false, pastEventWindowDays: null,
     titlePrefix: 'Private: ', autoUpdateMode: 'email'});
-  vm.runInContext(code, context);
+  vm.runInContext(runtime, context);
   assert.equal(context.skipIfEmptyFeed, false);
   assert.equal(context.pastEventWindowDays, null);
   assert.equal(context.titlePrefix, 'Private: ');
@@ -50,7 +53,7 @@ test('new sync options have defaults when an older private Config.gs omits them'
   assert.equal(context.autoUpdateBranch, 'stable');
 });
 
-test('native event hashes and migration fingerprints ignore API object key order', () => {
+test('native event hashes ignore API object key order', () => {
   const s = script({});
   const source = {calendar: {id: 'source-id', summary: 'Source'}, source: 'source-id'};
   const first = {id: 'event-1', summary: 'Meeting',
@@ -64,10 +67,6 @@ test('native event hashes and migration fingerprints ignore API object key order
   const a = s.makeNativeEvent(first, source);
   const b = s.makeNativeEvent(reordered, source);
   assert.equal(a.extendedProperties.private.MD5, b.extendedProperties.private.MD5);
-  s.migrationActions = [{action: 'update', start: first.start}];
-  const fingerprint = s.migrationFingerprint_();
-  s.migrationActions = [{start: reordered.start, action: 'update'}];
-  assert.equal(s.migrationFingerprint_(), fingerprint);
 });
 
 test('configuration finds the active email and falls back to the trigger owner', () => {
@@ -80,6 +79,31 @@ test('configuration finds the active email and falls back to the trigger owner',
   assert.equal(context.getSyncUserEmail_(), 'owner@example.com');
   context.Session.getActiveUser = () => ({getEmail() { return 'Active@Example.com'; }});
   assert.equal(context.getSyncUserEmail_(), 'active@example.com');
+});
+
+test('install creates AutoUpdate only when the current and owner emails match', () => {
+  const s = script({});
+  const created = [];
+  s.ScriptApp = {
+    getProjectTriggers() { return []; },
+    deleteTrigger() {},
+    newTrigger(handler) { return {
+      timeBased() { return this; }, everyHours() { return this; }, everyMinutes() { return this; },
+      after() { return this; }, everyDays() { return this; },
+      create() { created.push(handler); },
+    }; },
+  };
+  s.Session = {
+    getActiveUser() { return {getEmail() { return 'Owner@Example.com'; }}; },
+    getEffectiveUser() { return {getEmail() { return 'owner@example.com'; }}; },
+  };
+  s.install();
+  assert.deepEqual(created, ['startSync', 'startSync', 'AutoUpdate']);
+
+  created.length = 0;
+  s.Session.getActiveUser = () => ({getEmail() { return 'editor@example.com'; }});
+  s.install();
+  assert.deepEqual(created, ['startSync', 'startSync']);
 });
 
 test('sync lock is released after success and after an error', () => {
@@ -114,9 +138,8 @@ test('sync does no work when another run holds the lock', () => {
   assert.equal(releases, 0);
 });
 
-test('migration preview is read-only, stale reviews fail, and apply updates legacy events', () => {
+test('startSync silently migrates legacy events during the normal sync', () => {
   let writes = 0;
-  let digest = 'new';
   let stored = {id: 'target-event', summary: 'Old', start: {date: '2026-10-24'},
     extendedProperties: {private: {id: 'source-event', fromGAS: 'true', MD5: 'old'}}};
   const s = script({Settings: {get() { return {value: 'Etc/UTC'}; }},
@@ -133,58 +156,13 @@ test('migration preview is read-only, stale reviews fail, and apply updates lega
   s.setupTargetCalendar = () => ({id: 'target'});
   s.parseResponses = () => [{}];
   s.processSourceEvent = () => s.saveSourceEvent({summary: 'New', start: {date: '2026-10-24'},
-    extendedProperties: {private: {id: 'source-event', fromGAS: 'true', MD5: digest,
+    extendedProperties: {private: {id: 'source-event', fromGAS: 'true', MD5: 'new',
       sourceHash: s.sourceAddressHash('feed.ics'), syncVersion: '2'}}}, {});
   s.processEventCleanup = () => {};
 
-  assert.throws(() => s.startSync(), /Run PreviewMigration/);
-  assert.equal(writes, 0);
-  const preview = s.PreviewMigration();
-  assert.equal(preview.count, 1);
-  assert.equal(preview.actions[0].action, 'update');
-  assert.equal(writes, 0);
-  digest = 'changed';
-  assert.throws(() => s.ApplyMigration(), /changed since the review/);
-  assert.equal(writes, 0);
-  const revised = s.PreviewMigration();
-  assert.notEqual(revised.fingerprint, preview.fingerprint);
-  assert.equal(s.ApplyMigration().applied, true);
+  assert.equal(s.startSync(), undefined);
   assert.equal(writes, 1);
   assert.equal(stored.extendedProperties.private.syncVersion, '2');
-});
-
-test('a legacy event in a later target blocks writes to earlier targets', () => {
-  let writes = 0;
-  const s = script({Events: {
-    list(id) { return {items: id === 'second' ? [{id: 'legacy',
-      extendedProperties: {private: {fromGAS: 'true', id: 'old'}}}] : []}; },
-    insert() { writes++; return {}; },
-  }});
-  s.LockService = {getScriptLock() { return {tryLock() { return true; }, releaseLock() {}}; }};
-  s.sourceCalendars = [{source: 'a.ics', target: 'first'}, {source: 'b.ics', target: 'second'}];
-  s.setupTargetCalendar = name => ({id: name});
-  s.fetchSourceCalendars = () => [];
-  assert.throws(() => s.startSync(), /Legacy copied events found in second/);
-  assert.equal(writes, 0);
-});
-
-test('migration preview records legacy cleanup without tagging or deleting events', () => {
-  let writes = 0;
-  const s = script({Events: {
-    patch() { writes++; }, remove() { writes++; },
-  }});
-  s.migrationPreviewMode = true;
-  s.targetCalendarId = 'target';
-  s.targetCalendarName = 'Target';
-  s.calendarEventsIds = ['old-series'];
-  s.calendarEvents = [{id: 'target-parent', summary: 'Old series',
-    recurrence: ['RRULE:FREQ=DAILY'], start: {date: '2099-01-01'},
-    end: {date: '2099-01-02'},
-    extendedProperties: {private: {id: 'old-series', fromGAS: 'true'}}}];
-  s.registerLegacySeries('old-series', 'feed.ics');
-  s.processEventCleanup([{source: 'feed.ics'}]);
-  assert.equal(writes, 0);
-  assert.deepEqual(Array.from(s.migrationActions, action => action.action), ['tag source', 'delete']);
 });
 
 test('target calendar lookup reads later pages before creating a calendar', () => {
@@ -1200,23 +1178,33 @@ test('an ICS override never changes a different series at the same recurrence ti
   assert.deepEqual(Array.from(second, event => event.getFirstPropertyValue('summary')), ['Second', 'Moved second']);
 });
 
-test('clearGASEvents command previews Work and its helper deletes only script-created events when explicit', () => {
+test('clearGASEvents accepts a configured target or null for all targets and deletes only script-created events when explicit', () => {
   const removed = [];
   const s = script({
-    CalendarList: {list() { return {items: [{id: 'target-id', summary: 'Work', accessRole: 'owner'}]}; }},
+    CalendarList: {list() { return {items: [
+      {id: 'work-id', summary: 'Work', accessRole: 'owner'},
+      {id: 'home-id', summary: 'Home', accessRole: 'writer'},
+    ]}; }},
     Events: {
-      list() { return {items: [
-        {id: 'parent', recurrence: ['RRULE:FREQ=DAILY'], extendedProperties: {private: {fromGAS: 'true'}}},
-        {id: 'owned', extendedProperties: {private: {fromGAS: 'true'}}},
-        {id: 'other', extendedProperties: {private: {fromGAS: 'false'}}},
-      ]}; },
-      remove(_calendar, id) { removed.push(id); },
+      list(calendar) { return {items: calendar === 'work-id' ? [
+          {id: 'parent', recurrence: ['RRULE:FREQ=DAILY'], extendedProperties: {private: {fromGAS: 'true'}}},
+          {id: 'owned', extendedProperties: {private: {fromGAS: 'true'}}},
+          {id: 'other', extendedProperties: {private: {fromGAS: 'false'}}},
+        ] : [{id: 'home-owned', extendedProperties: {private: {fromGAS: 'true'}}}]}; },
+      remove(calendar, id) { removed.push([calendar, id]); },
     },
   });
-  s.sourceCalendars = [{source: 'feed.ics', target: 'Work'}];
-  assert.equal(s.clearGASEvents().count, 2);
+  s.sourceCalendars = [
+    {source: 'work.ics', target: 'Work'},
+    {source: 'home.ics', target: 'Home'},
+  ];
+  const all = s.clearGASEvents();
+  assert.equal(all.count, 3);
+  assert.deepEqual(Array.from(all.targets, result => [result.target, result.count]), [['Work', 2], ['Home', 1]]);
+  assert.equal(s.clearGASEvents_('Work', true).count, 2);
   assert.deepEqual(removed, []);
   assert.equal(s.clearGASEvents_('Work', false).dryRun, false);
-  assert.deepEqual(removed, ['owned', 'parent']);
-  assert.throws(() => s.clearGASEvents_('unconfigured', false));
+  assert.deepEqual(removed, [['work-id', 'owned'], ['work-id', 'parent']]);
+  assert.throws(() => s.clearGASEvents_(undefined, false), /or null for all targets/);
+  assert.throws(() => s.clearGASEvents_('unconfigured', false), /or null for all targets/);
 });

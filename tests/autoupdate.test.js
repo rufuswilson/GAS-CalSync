@@ -52,6 +52,10 @@ function setup(options = {}) {
       getProperty(key) { return properties.get(key) || null; },
       setProperty(key, value) { properties.set(key, value); },
     }; }},
+    Session: {
+      getActiveUser() { return {getEmail() { return 'owner@example.com'; }}; },
+      getEffectiveUser() { return {getEmail() { return 'owner@example.com'; }}; },
+    },
     ScriptApp: {getScriptId() { return 'project-id'; }, getOAuthToken() { return 'token'; }},
     MailApp: {sendEmail(...args) { emails.push(args); }},
     Utilities: {
@@ -124,7 +128,7 @@ test('email mode sends one notice and does not write project content', () => {
 
 test('configured GitHub token authenticates source downloads too', () => {
   const s = setup({token: 'test-token'});
-  s.context.AutoUpdate(true);
+  s.context.PreviewUpdate();
   const githubCalls = s.calls.filter(call => call.url.startsWith(repoApi));
   assert.equal(githubCalls.length, 7);
   assert.ok(githubCalls.every(call => call.params.headers.Authorization === 'Bearer test-token'));
@@ -133,7 +137,7 @@ test('configured GitHub token authenticates source downloads too', () => {
 
 test('bleeding-edge pins a commit and rejects a release missing the updater', () => {
   const s = setup({channel: 'bleeding-edge'});
-  s.context.AutoUpdate(true);
+  s.context.PreviewUpdate();
   assert.equal(s.writes.length, 0);
   assert.ok(s.calls.filter(call => call.url.startsWith('https://raw.githubusercontent.com/'))
     .every(call => call.url.includes('/' + 'a'.repeat(40) + '/')));
@@ -146,7 +150,7 @@ test('updater accepts a legacy version with AutoUpdate in Helpers.gs', () => {
   const s = setup();
   s.sources['Code.gs'] = 'function startSync() {}';
   s.sources['Helpers.gs'] = 'function AutoUpdate() {}';
-  s.context.AutoUpdate(true);
+  s.context.PreviewUpdate();
   assert.equal(s.writes.length, 0);
 });
 
