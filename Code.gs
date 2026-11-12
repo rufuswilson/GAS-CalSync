@@ -131,59 +131,11 @@ function PreviewUpdate() {
 
 /**
  * Preview or remove events created by this script from one configured target.
- * Call clearGASEvents("Target") to preview, then clearGASEvents("Target", false)
- * to delete. This does not create a calendar when the target is missing.
+ * Edit the target and preview flag below before running this function.
+ * A preview is safe: set the second argument to false only to delete.
  */
-function clearGASEvents(targetName, dryRun) {
-  if (!targetName || !condenseCalendarMap(sourceCalendars).some(function (group) { return group.target === targetName; }))
-    throw new Error("Specify a configured target calendar name");
-
-  var calendars = [];
-  var pageToken;
-  do {
-    var options = { showHidden: true, maxResults: 250 };
-    if (pageToken) options.pageToken = pageToken;
-    var page = callWithBackoff(function () { return Calendar.CalendarList.list(options); }, defaultMaxRetries);
-    if (!page) throw new Error("Could not list calendars");
-    calendars = calendars.concat(page.items || []);
-    pageToken = page.nextPageToken;
-  } while (pageToken);
-  var matches = calendars.filter(function (calendar) {
-    return (calendar.summaryOverride || calendar.summary) === targetName &&
-      (calendar.accessRole === "owner" || calendar.accessRole === "writer");
-  });
-  if (matches.length !== 1) throw new Error("Expected exactly one writable target calendar named " + targetName);
-
-  var events = [];
-  pageToken = undefined;
-  do {
-    var eventOptions = {
-      maxResults: 2500, showDeleted: false, singleEvents: false,
-      privateExtendedProperty: "fromGAS=true"
-    };
-    if (pageToken) eventOptions.pageToken = pageToken;
-    var eventPage = callWithBackoff(function () { return Calendar.Events.list(matches[0].id, eventOptions); }, defaultMaxRetries);
-    if (!eventPage) throw new Error("Could not list script-created events");
-    events = events.concat((eventPage.items || []).filter(function (event) {
-      return event.extendedProperties && event.extendedProperties.private &&
-        event.extendedProperties.private.fromGAS === "true";
-    }));
-    pageToken = eventPage.nextPageToken;
-  } while (pageToken);
-
-  var preview = dryRun !== false;
-  if (!preview) {
-    events.sort(function (a, b) { return Number(!!a.recurrence) - Number(!!b.recurrence); });
-    events.forEach(function (event) {
-      var removed = callWithBackoff(function () {
-        Calendar.Events.remove(matches[0].id, event.id);
-        return true;
-      }, defaultMaxRetries);
-      if (!removed) throw new Error("Could not remove script-created event " + event.id);
-    });
-  }
-  Logger.log((preview ? "Would remove " : "Removed ") + events.length + " script-created events from " + targetName);
-  return { target: targetName, dryRun: preview, count: events.length };
+function clearGASEvents() {
+  return clearGASEvents_("Work", true);
 }
 
 // Per-calendar global variables (must be reset before processing each new calendar!)
@@ -206,41 +158,9 @@ var reportOverallFailure = false;
 var migrationPreviewMode = false;
 var migrationActions = [];
 
-function recordMigrationAction_(action, event, copy) {
-  migrationActions.push({ action: action, target: targetCalendarName, targetId: targetCalendarId,
-    eventId: event && event.id || "", sourceId: copy && copy.extendedProperties &&
-      copy.extendedProperties.private && copy.extendedProperties.private.id || "",
-    summary: copy && copy.summary || event && event.summary || "",
-    start: copy && copy.start || event && event.start || null,
-    digest: copy && copy.extendedProperties && copy.extendedProperties.private &&
-      copy.extendedProperties.private.MD5 || "" });
-}
-
-function migrationFingerprint_() {
-  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5,
-    stableStringify(migrationActions), Utilities.Charset.UTF_8);
-  return bytes.map(function (byte) { return (byte & 255).toString(16).padStart(2, "0"); }).join("");
-}
-
 /** Read-only preview of the changes that the v2 sync would make. */
 function PreviewMigration() {
   return previewMigration_(true);
-}
-
-function previewMigration_(remember) {
-  migrationActions = [];
-  migrationPreviewMode = true;
-  try {
-    startSync();
-    var fingerprint = migrationFingerprint_();
-    if (remember) PropertiesService.getScriptProperties().setProperty("migrationPreview:v2", fingerprint);
-    var result = { fingerprint: fingerprint, count: migrationActions.length,
-      actions: migrationActions.slice() };
-    Logger.log("Migration preview: " + JSON.stringify(result));
-    return result;
-  } finally {
-    migrationPreviewMode = false;
-  }
 }
 
 /** Apply a previously reviewed preview if it still describes the current changes. */
@@ -261,42 +181,6 @@ function ApplyMigration() {
   }
   Logger.log("Migration applied: " + fresh.count + " proposed changes");
   return { applied: true, count: fresh.count };
-}
-
-/** Check every existing target before a scheduled sync can write to any of them. */
-function requireMigrationReview_() {
-  var properties = PropertiesService.getScriptProperties();
-  if (properties.getProperty("migrationApproved:v2") === "true") return;
-  var groups = condenseCalendarMap(sourceCalendars);
-  if (groups.length < 2) return; // The normal target read checks a single target before writing.
-  groups.forEach(function (group) {
-    var target;
-    try {
-      target = setupTargetCalendar(group.target, group.targetId, false);
-    } catch (error) {
-      if (group.createTargetCalendarIfMissing === true &&
-        /^Error: Target calendar not found: /.test(String(error))) return;
-      throw error;
-    }
-    var pageToken;
-    var seen = Object.create(null);
-    do {
-      var options = { showDeleted: false, privateExtendedProperty: "fromGAS=true", maxResults: 250 };
-      if (pageToken) options.pageToken = pageToken;
-      var page = callWithBackoff(function () { return Calendar.Events.list(target.id, options); }, defaultMaxRetries);
-      if (!page) throw new Error("Could not check target events before migration: " + group.target);
-      if ((page.items || []).some(function (event) {
-        var privateFields = event.extendedProperties && event.extendedProperties.private;
-        return event.status !== "cancelled" && privateFields &&
-          privateFields.fromGAS === "true" && privateFields.syncVersion !== "2";
-      })) throw new Error("Legacy copied events found in " + group.target +
-        ". Run PreviewMigration, review the log, then run ApplyMigration");
-      pageToken = page.nextPageToken;
-      if (pageToken && seen[pageToken]) throw new Error("Repeated target-event page token for " + group.target);
-      if (pageToken) seen[pageToken] = true;
-    } while (pageToken);
-  });
-  properties.setProperty("migrationApproved:v2", "true");
 }
 
 function startSync() {

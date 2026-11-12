@@ -1200,10 +1200,10 @@ test('an ICS override never changes a different series at the same recurrence ti
   assert.deepEqual(Array.from(second, event => event.getFirstPropertyValue('summary')), ['Second', 'Moved second']);
 });
 
-test('clearGASEvents previews by default and deletes only script-created events when explicit', () => {
+test('clearGASEvents command previews Work and its helper deletes only script-created events when explicit', () => {
   const removed = [];
   const s = script({
-    CalendarList: {list() { return {items: [{id: 'target-id', summary: 'targetCalendar1', accessRole: 'owner'}]}; }},
+    CalendarList: {list() { return {items: [{id: 'target-id', summary: 'Work', accessRole: 'owner'}]}; }},
     Events: {
       list() { return {items: [
         {id: 'parent', recurrence: ['RRULE:FREQ=DAILY'], extendedProperties: {private: {fromGAS: 'true'}}},
@@ -1213,9 +1213,10 @@ test('clearGASEvents previews by default and deletes only script-created events 
       remove(_calendar, id) { removed.push(id); },
     },
   });
-  assert.equal(s.clearGASEvents('targetCalendar1').count, 2);
+  s.sourceCalendars = [{source: 'feed.ics', target: 'Work'}];
+  assert.equal(s.clearGASEvents().count, 2);
   assert.deepEqual(removed, []);
-  assert.equal(s.clearGASEvents('targetCalendar1', false).dryRun, false);
+  assert.equal(s.clearGASEvents_('Work', false).dryRun, false);
   assert.deepEqual(removed, ['owned', 'parent']);
-  assert.throws(() => s.clearGASEvents('unconfigured', false));
+  assert.throws(() => s.clearGASEvents_('unconfigured', false));
 });
